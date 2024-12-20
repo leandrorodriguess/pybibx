@@ -35,10 +35,12 @@ from bertopic import BERTopic
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 from gensim.models import FastText
+from itertools import combinations
 from matplotlib import pyplot as plt                       
 plt.style.use('bmh') 
 from numba import njit
 from numba.typed import List
+#from rapidfuzz import fuzz
 from scipy.sparse import coo_matrix
 from scipy.sparse import csr_matrix
 from sentence_transformers import SentenceTransformer                    
@@ -528,6 +530,10 @@ class pbx_probe():
         self.aut_single         = len([item  for item in self.aut_docs if item == 1])
         self.aut_multi          = [item for item in self.aut_docs if item > 1]
         self.aut_cit            = self.__get_counts(self.u_aut, self.aut, self.citation)
+        self.author_to_papers   = defaultdict(list)
+        for paper_idx, authors in enumerate(self.aut):
+            for author in authors:
+                self.author_to_papers[author].append(paper_idx)
         self.kid, self.u_kid    = self.__get_str(entry = 'keywords', s = ';', lower = True, sorting = True)
         if ('unknown' in self.u_kid):
             self.u_kid.remove('unknown')
@@ -739,51 +745,35 @@ class pbx_probe():
             else:
                 break
         return cleaned_doi
-    
-    # Function: Get Duplicates Index
-    def find_duplicates(self, u_list):
-        duplicates = []
-        indices    = []
-        for i in range(0, len(u_list)):
-            x = u_list[i]
-            if (u_list.count(x) > 1 and x not in indices):
-                u_list.index(u_list[i])
-                duplicates.append([i for i in range(0, len(u_list)) if u_list[i] == x])
-                indices.append(x)
-        return indices, duplicates
-    
-    # Function: Fuzzy String Matcher
-    def fuzzy_matcher(self, entry = 'aut', cut_ratio = 0.80, verbose = True): # 'aut', 'inst'
-        if (entry == 'aut'):
-            u_lst = [item for item in self.u_aut]
-        elif (entry == 'inst'):
-            u_lst = [item for item in self.u_uni]
+        
+    # Function: Fuzzy String Matcher # Entry = self.u_aut, self.u_inst, or list with Unique items
+    def fuzzy_matcher(self, entry, tgt = [], cut_ratio = 0.80):
+        u_lst   = [item for item in entry]
+        matches = {item: [] for item in u_lst}
+        if (tgt):
+            for target in tgt:
+                if (target not in u_lst):
+                    continue  
+                for other in u_lst:
+                    if (other == target):
+                        continue  
+                    ratio = SequenceMatcher(None, target, other).ratio()
+                    #ratio = fuzz.ratio(target, other)/100
+                    if (cut_ratio <= ratio < 1):
+                        matches[target].append(other)
+                        matches[other].append(target)
         else:
-            u_lst = [item for item in entry]
-        fuzzy_lst = [[] for item in u_lst ]
-        idx       = [i for i in range(0, len(u_lst))]
-        i         = 0
-        while (len(idx) != 0):
-            if (i in idx):
-                idx.remove(i)
-            for j in idx:
-                ratio = SequenceMatcher(None, u_lst[i], u_lst[j]).ratio()
-                if (ratio >= cut_ratio and ratio < 1):
-                    fuzzy_lst[i].append(u_lst[j])
-                    if (j in idx):
-                        idx.remove(j)
-            i = i + 1
-        indices = [i for i, x in enumerate(fuzzy_lst) if x == []]
-        for i in sorted(indices, reverse = True):
-            del fuzzy_lst[i]
-            del u_lst[i]
-        fuzzy_dict = dict(zip(u_lst, fuzzy_lst))
-        if (verbose == True):
-            for key, value in fuzzy_dict.items():
-               print(str(key)+': '+str('; '.join(value)))
-        return fuzzy_dict
-
-    # Function: Merge Database
+            for i, j in combinations(range(0, len(u_lst)), 2):
+                str1, str2 = u_lst[i], u_lst[j]
+                ratio      = SequenceMatcher(None, str1, str2).ratio()
+                #ratio      = fuzz.ratio(str1, str2)/100
+                if (cut_ratio <= ratio < 1):
+                    matches[str1].append(str2)
+                    matches[str2].append(str1)
+        matches = {k: v for k, v in matches.items() if v}
+        return matches
+    
+        # Function: Merge Database
     def merge_database(self, file_bib, db, del_duplicated):
         old_vb   = [item for item in self.vb]
         old_size = self.data.shape[0]
@@ -960,7 +950,7 @@ class pbx_probe():
         check  = {
                     'abbrev_source_title': 'Sources',
                     'abstract':            'Abstracts',
-                    'affiliation':         'Institutions',
+                    'affiliation':         'Affiliation',
                     'author':              'Author(s)',
                     'doi':                 'DOI',
                     'author_keywords':     'Keywords - Authors',
@@ -972,12 +962,12 @@ class pbx_probe():
             if (col in self.data.columns):
                 unknown_count = (self.data[col].astype(str) == 'UNKNOWN').sum()
                 health_metric = ((n - unknown_count) / n) * 100
-                health.append([name, f'{health_metric:.2f}%'])
+                health.append([name, f'{health_metric:.2f}%', str(n - unknown_count)])
             else:
                 health.append([name, None])
-        health_df = pd.DataFrame(health, columns = ['Entries', 'Completeness (%)'])
+        health_df = pd.DataFrame(health, columns = ['Entries', 'Completeness (%)', 'Number of  Docs'])
         return health_df
-
+    
     ##############################################################################
 
     # Function: Read .bib File
@@ -986,8 +976,8 @@ class pbx_probe():
         ##############################################################################
         
         def assign_authors_to_affiliations(authors_str, affiliations_str):
-            authors = [a.strip() for a in authors_str.split(' and ')]
-            affiliations = [a.strip() for a in affiliations_str.split(';')]
+            authors          = [a.strip() for a in authors_str.split(' and ')]
+            affiliations     = [a.strip() for a in affiliations_str.split(';')]
             new_affiliations = []
             for i, aff in enumerate(affiliations):
                 if i < len(authors):
@@ -1901,7 +1891,6 @@ class pbx_probe():
                                     textinfo      = 'label+value',  
                                     texttemplate  = '%{label}<br>(%{value})',
                                     textfont      = dict(size = 12),
-                                    #hovertemplate = '<b>%{label}</b><br>Value: %{value}<extra></extra>',
                                     marker        = dict(colors = self.color_names)
                                  )
                        )
@@ -2048,8 +2037,7 @@ class pbx_probe():
                                     )   ],
                 name    = str(year)
             ))
-    
-        # Initial data for "All Years"
+            
         initial_data = go.Choropleth(
                                         locations         = list(all_years_data.keys()),
                                         locationmode      = 'country names',
@@ -2061,7 +2049,6 @@ class pbx_probe():
                                         hoverinfo         = 'location+z'
         )
     
-        # Layout with slider
         layout = go.Layout(
                             geo = dict(
                                         scope          = 'world',
@@ -2690,7 +2677,7 @@ class pbx_probe():
         return h_i
     
     # Function: Total and Self Citations
-    def __total_and_self_citations(self):
+    def __total_and_self_citations_(self):
         t_c = []
         s_c = []
         for researcher in self.u_aut:
@@ -2699,7 +2686,24 @@ class pbx_probe():
             for i, authors in enumerate(self.aut):
                 if (researcher in authors):
                     total_citations = total_citations + self.citation[i]
-                    self_citations  = self_citations + sum(1 for ref in self.ref[i] if researcher in ref.lower())
+                    self_citations  = self_citations  + sum(1 for ref in self.ref[i] if researcher in ref.lower())
+            t_c.append(total_citations)
+            s_c.append(self_citations)
+        return t_c, s_c
+
+    def __total_and_self_citations(self):
+        preprocessed_refs = [ [ref.lower() for ref in refs] for refs in self.ref ]
+        t_c               = []
+        s_c               = []
+        for researcher in self.u_aut:
+            authored_papers = self.author_to_papers.get(researcher, [])
+            if not authored_papers:
+                t_c.append(0)
+                s_c.append(0)
+                continue
+            total_citations  = sum(self.citation[paper_idx] for paper_idx in authored_papers)
+            researcher_lower = researcher.lower()
+            self_citations   = sum(1 for paper_idx in authored_papers for ref in preprocessed_refs[paper_idx] if researcher_lower in ref)
             t_c.append(total_citations)
             s_c.append(self_citations)
         return t_c, s_c
@@ -3123,7 +3127,7 @@ class pbx_probe():
         self.matrix_r            = pd.DataFrame.sparse.from_spmatrix(sparse_matrix, columns = self.u_ref)
         self.labels_r            = [f'r_{i}' for i in range(0, num_cols)]
         sources                  = self.data['source'].str.lower()
-        keys_1                   = self.data['title'].str.lower().str.replace('[', '', regex = False).str.replace(']', '', regex=False).tolist()
+        keys_1                   = self.data['title'].str.lower().str.replace('[', '', regex = False).str.replace(']', '', regex = False).tolist()
         keys_2                   = self.data['doi'].str.lower().tolist()
         keys                     = np.where(sources.isin(['scopus', 'pubmed']), keys_1, np.where(sources == 'wos', keys_2, None))
         corpus                   = ' '.join(ref.lower() for ref in self.u_ref)
@@ -3148,12 +3152,33 @@ class pbx_probe():
             self.matrix_r = self.matrix_r.loc[:, mask]
             self.labels_r = self.matrix_r.columns.tolist()
         if (min_cites >= 1):
-            col_sums      = self.matrix_r.sum(axis=0)
+            col_sums      = self.matrix_r.sum(axis = 0)
             cols_to_keep  = col_sums[col_sums >= min_cites].index
             self.matrix_r = self.matrix_r[cols_to_keep]
             self.labels_r = cols_to_keep.tolist()
         self.matrix_r = self.matrix_r.astype(pd.SparseDtype('float', 0))
         return self
+
+    # Function: Make Matrix
+    def make_matrix(self, entry = 'aut', min_count = 0, local_nodes = False):
+        if   (entry == 'aut'):
+            self.__adjacency_matrix_aut(min_count)
+            return self.matrix_a
+        elif (entry == 'cout'):
+            self.__adjacency_matrix_ctr(min_count)
+            return self.matrix_a
+        elif (entry == 'inst'):
+            self.__adjacency_matrix_inst(min_count)
+            return self.matrix_a
+        elif (entry == 'kwa'):
+            self.__adjacency_matrix_kwa(min_count)
+            return self.matrix_a
+        elif (entry == 'kwp'):
+            self.__adjacency_matrix_kwp(min_count)
+            return self.matrix_a
+        elif (entry == 'ref'):
+            self.__adjacency_matrix_ref(min_count, local_nodes)
+            return self.matrix_r
 
     # Function: Network Collab
     def network_collab(self, entry = 'aut', tgt = [], topn = 15, rows = 5, cols = 3, wspace = 0.2, hspace = 0.2, tspace = 0.01, node_size = 300, font_size = 8, pad = 0.2, nd_a = '#FF0000', nd_b = '#008000', nd_c = '#808080', verbose = False):
@@ -4088,228 +4113,273 @@ class pbx_probe():
         return
     
     # Function: Citation History Network
-    def network_hist(self, view = 'browser', min_count = 1, node_size = -1, node_labels = False, back = [], forward = []):
-        years = list(range(self.date_str, self.date_end+1)) 
-        if (view == 'browser' ):
+    def network_hist(self, view = 'browser', min_links = 0, chain = [], path = True, node_size = 20, node_labels = True):
+        
+        ############################################################################
+                     
+        def filter_matrix_by_citations(matrix_r, min_links):
+            filtered_matrix = matrix_r.copy()
+            row_sums        = filtered_matrix.sum(axis = 1)
+            row_sums_sorted = row_sums.sort_values(ascending = False) 
+            hold_list       = set() 
+            node_min        = []
+            for node, link_count in row_sums_sorted.items():
+                if (link_count >= min_links):
+                    hold_list.add(node)
+                    node_min.append(node)
+                    linked_nodes = filtered_matrix.loc[node][filtered_matrix.loc[node] > 0].index
+                    linked_nodes = [int(item) for item in linked_nodes ]
+                    hold_list.update(linked_nodes)                     
+            node_min        = [str(item) for item in node_min]
+            all_nodes       = set(filtered_matrix.index)
+            dropped_indices = list(all_nodes - hold_list)
+            hold_list       = list(hold_list)
+            filtered_matrix = filtered_matrix.loc[hold_list, :]
+            return filtered_matrix, dropped_indices, node_min
+
+        ############################################################################
+        
+        if (view == 'browser'):
             pio.renderers.default = 'browser'
-        if (node_labels == True and node_size == -1):
+        if (node_labels == True):
             mode = 'markers+text'
-            size = 50
-        elif (node_labels == False and node_size == -1):
+        else:
             mode = 'markers'
-            size = 10
-        elif (node_labels == True and node_size > 0):
-            mode = 'markers+text'
-            size = node_size
-        elif (node_labels == False and node_size > 0):
-            mode = 'markers'
-            size = node_size
-        self.__adjacency_matrix_ref(min_count, True)
-        adjacency_matrix = self.matrix_r.values
-        G                = nx.DiGraph()
-        rows, cols       = np.where(adjacency_matrix >= 1)
-        edges            = list(zip(rows.tolist(), cols.tolist()))
-        u_rows           = list(set(rows.tolist()))
-        u_cols           = list(set(cols.tolist()))
-        labels           = [self.labels_r[item] for item in u_cols]
-        labels           = sorted(labels, key = self.natsort)
-        Xn               = []
-        Yn               = []
-        Xa               = []
-        Ya               = []
-        ys               = list(range(self.date_str, self.date_end+1))
-        dict_y           = dict(zip(ys, list(range(0, len(ys)))))
-        flag             = 0
-        y_lst            = []
-        for name in labels: 
-            if (name.find('r_') != -1):
-                color = 'red'
-                year  = self.dy_ref[ int(name.replace('r_','')) ]
-                if (len(self.u_ref) > 0):
-                    n_id  = self.u_ref [ int(name.replace('r_','')) ]
+        if (len(chain) > 0):
+            chain = [str(c) for c in chain]
+        articles          = self.data[['author', 'title',  'journal', 'doi']]
+        articles['id']    = self.table_id_doc.iloc[:,0]
+        articles['year']  = self.data['year'].astype(int)
+        self.__adjacency_matrix_ref(0, True)
+        matrix, idx, n_m  = filter_matrix_by_citations(self.matrix_r, min_links)
+        rows, cols        = np.where(matrix >= 1)
+        row_map           = {idx: int(row_name) for idx, row_name in enumerate(matrix.index)}
+        col_map           = {idx: int(col_name) for idx, col_name in enumerate(matrix.columns)}
+        citations         = [(row_map[r], col_map[c]) for (r, c) in zip(rows, cols)]
+        rev               = [(tgt, src) for (src, tgt) in citations]
+        citations         = citations + rev    
+        citations         = [tup for tup in citations if tup[0] != tup[1]]
+        articles          = articles.drop(index = idx, errors = 'ignore')
+        articles          = articles.sort_values(by = 'year').reset_index(drop = True)
+        articles['x_pos'] = articles['year']
+        years             = sorted(articles['year'].unique())
+        y_offsets         = {}
+        for yr in years:
+            indices = articles.index[articles['year'] == yr].tolist()
+            indices = sorted(indices, key = lambda x: self.natsort(str(articles.loc[x, 'id'])))
+            count   = len(indices)
+            offsets = [i*1.2 for i in range(0, count)]
+            for idx, art_idx in enumerate(indices):
+                y_offsets[art_idx] = offsets[idx]
+        articles['y_pos'] = [y_offsets[i] for i in articles.index]
+        hover_texts       = []
+        articles          = articles.sort_values(by = 'x_pos')
+        for i, row in articles.iterrows():
+            txt          = f"id: {row['id']}<br>"
+            meta         = f"{row['author']} ({row['year']}). {row['title']}. {row['journal']}. doi:{row['doi']}"
+            wrapped_meta = "<br>".join(textwrap.wrap(meta, width = 50))
+            txt          = txt + wrapped_meta
+            hover_texts.append(txt)
+        node_trace = go.Scatter(
+                                x         = articles['x_pos'],
+                                y         = articles['y_pos'],
+                                mode      = mode,
+                                marker    = dict( symbol = 'circle-dot', size = node_size, color = 'blue', line = dict(color = 'rgb(50, 50, 50)', width = 0.15) ),
+                                text      = articles['id'] if node_labels else None,
+                                hoverinfo = 'text',
+                                hovertext = hover_texts,
+                                name      = ''
+                               )
+        Xa, Ya       = [], []
+        article_dict = articles.set_index('id').to_dict(orient = 'index')
+        for (src, tgt) in citations:
+            if (str(src) in article_dict and str(tgt) in article_dict):
+                Xa.append(article_dict[str(src)]['x_pos'])
+                Ya.append(article_dict[str(src)]['y_pos'])
+                Xa.append(article_dict[str(tgt)]['x_pos'])
+                Ya.append(article_dict[str(tgt)]['y_pos'])
+                Xa.append(None)
+                Ya.append(None)
+        edge_trace = go.Scatter(
+                                x         = Xa, 
+                                y         = Ya,
+                                mode      = 'lines',
+                                line      = dict(color = 'rgba(0, 0, 0, 0.15)', width = 0.5, dash = 'dot'),
+                                hoverinfo = 'none',
+                                name      = ''
+                                )
+        if (len(chain) > 0):
+            chain          = [str(c) for c in chain]  
+            adjacency_list = {}
+            for (src, tgt) in citations:
+                src_str, tgt_str = str(src), str(tgt)
+                adjacency_list.setdefault(src_str, []).append(tgt_str)
+            neighbors = set()
+            if (path == False):
+                for c in chain:
+                    if (c in adjacency_list):
+                        for neigh in adjacency_list[c]:
+                            if (neigh not in chain):
+                                neighbors.add(neigh)
+            node_colors = []
+            for i, row in articles.iterrows():
+                art_id_str = str(row['id'])
+                if (art_id_str in chain):
+                    node_colors.append('green')
+                elif (art_id_str in neighbors):
+                    node_colors.append('red')
+                elif (art_id_str in n_m):
+                    node_colors.append('rgba(50, 50, 50, 0.15)')
                 else:
-                    n_id  = ''
-                if ( year not in y_lst):
-                    y_lst.append(year)
-                    flag = 0
-                elif (year in y_lst):
-                    counter = y_lst.count(year)
-                    flag    = counter*1.2
-                    y_lst.append(year)
-                G.add_node(name, color = color,  year = year, n_id = n_id, flag = flag)
+                    node_colors.append('rgba(0, 0, 255, 0.15)')
+            Xa_chain, Ya_chain = [], []
+            Xa_other, Ya_other = [], []
+            if (path == False):
+                for (src, tgt) in citations:
+                    src_str, tgt_str = str(src), str(tgt)
+                    if (src_str in article_dict and tgt_str in article_dict):
+                        x1 = article_dict[src_str]['x_pos']
+                        y1 = article_dict[src_str]['y_pos']
+                        x2 = article_dict[tgt_str]['x_pos']
+                        y2 = article_dict[tgt_str]['y_pos']
+                        if (src_str in chain):
+                            Xa_chain.extend([x1, x2, None])
+                            Ya_chain.extend([y1, y2, None])
+                        else:
+                            Xa_other.extend([x1, x2, None])
+                            Ya_other.extend([y1, y2, None])
             else:
-                if (int(name.replace('r_','')) not in u_rows):
-                    u_rows.append(int(name.replace('r_','')))
-        u_rows = [str(item) for item in u_rows]
-        u_rows = sorted(u_rows, key = self.natsort)
-        flag   = 0
-        y_lst  = []
-        for name in u_rows:
-            color = 'blue'
-            year  = int(self.dy[ int(name) ])
-            n_id  = self.data.loc[int(name), 'author']+' ('+self.data.loc[int(name), 'year']+'). '+self.data.loc[int(name), 'title']+'. '+self.data.loc[int(name), 'journal']+'. doi:'+self.data.loc[int(name), 'doi']+'. '
-            if ( year not in y_lst):
-                y_lst.append(year)
-                flag = 0
-            elif (year in y_lst):
-                counter = y_lst.count(year)
-                flag    = counter*1.2
-                y_lst.append(year)
-            G.add_node(name, color = color, year = year, n_id = n_id, flag = flag)
-            Xn.append(dict_y[year])
-            Yn.append(flag)
-        for i in range(0, len(edges)):
-            srt, end = edges[i]
-            srt_     = str(srt)
-            end_     = self.labels_r[end]
-            if ( end_ != '-1' ):
-                G.add_edge(srt_, end_)
-        self.ask_gpt_hist = pd.DataFrame(G.edges, columns = ['Paper ID (Year)', 'References (Year)'])
-        for i in range(0, self.ask_gpt_hist.shape[0]):
-            self.ask_gpt_hist.iloc[i, 0] = str(self.ask_gpt_hist.iloc[i, 0]) + ' (' + str(G.nodes[self.ask_gpt_hist.iloc[i,0]]['year']) + ')'
-            self.ask_gpt_hist.iloc[i, 1] = str(self.ask_gpt_hist.iloc[i, 1]) + ' (' + str(G.nodes[self.ask_gpt_hist.iloc[i,1]]['year']) + ')'
-        self.ask_gpt_hist = self.ask_gpt_hist[self.ask_gpt_hist.apply(lambda row: len(row.unique()) > 1, axis = 1)]
-        node_list         = list(G.nodes)
-        edge_list         = list(G.edges)
-        nids_list         = [G.nodes[n]['n_id'] for n in G.nodes()]
-        nids_list         = ['<br>'.join(textwrap.wrap(txt, width = 50)) for txt in nids_list]
-        nids_list         = ['id: '+node_list[i]+'<br>'+nids_list[i] for i in range(0, len(nids_list))]
-        for edge in edge_list:
-            Xa.append(dict_y[G.nodes[edge[0]]['year']]) 
-            Xa.append(dict_y[G.nodes[edge[1]]['year']])
-            Xa.append(None)
-            Ya.append(G.nodes[edge[0]]['flag'])
-            Ya.append(G.nodes[edge[1]]['flag'])
-            Ya.append(None)
-        data    = []
-        a_trace = go.Scatter(x         = Xa,
-                             y         = Ya,
-                             mode      = 'lines',
-                             line      = dict(color = 'rgba(0, 0, 0, 0.25)', width = 0.5, dash = 'dot'),
-                             hoverinfo = 'none',
-                             name      = ''
-                             )
-        data.append(a_trace)
-        n_trace = go.Scatter(x         = Xn,
-                             y         = Yn,
-                             opacity   = 0.45,
-                             mode      = mode,
-                             marker    = dict(symbol = 'circle-dot', size = size, color = 'blue', line = dict(color = 'rgb(50, 50, 50)', width = 0.15)),
-                             text      = node_list,
-                             hoverinfo = 'text',
-                             hovertext = nids_list,
-                             name      = ''
-                             )
-        data.append(n_trace)
-        layout  = go.Layout(showlegend = False,
-                            hovermode  = 'closest',
-                            margin     = dict(b = 10, l = 5, r = 5, t = 10),
-                            xaxis      = dict(showgrid = False, zeroline = False, showticklabels = True, tickmode = 'array', tickvals       = list(range(0, len(years))), ticktext = years, tickangle =  90),
-                            yaxis      = dict(showgrid = False, zeroline = False, showticklabels = False)
-                            ) 
-        if (len(back) > 0):
-            e_lst = []
-            Xb    = []
-            Yb    = []
-            Xm    = []
-            Ym    = []
-            n_lst = []
-            t_lst = []
-            for item in back:
-                item = str(item)
-                for edge in edge_list:
-                    a, b = edge
-                    if (item == a):
-                        e_lst.append(edge)
-                        back.append(b)
-            for edge in e_lst:
-                Xb.append(dict_y[G.nodes[edge[0]]['year']]) 
-                Xb.append(dict_y[G.nodes[edge[1]]['year']])
-                Xb.append(None)
-                Yb.append(G.nodes[edge[0]]['flag'])
-                Yb.append(G.nodes[edge[1]]['flag'])
-                Yb.append(None)
-                Xm.append(dict_y[G.nodes[edge[0]]['year']])
-                Ym.append(G.nodes[edge[0]]['flag'])
-                Xm.append(dict_y[G.nodes[edge[1]]['year']])
-                Ym.append(G.nodes[edge[1]]['flag'])
-                n_lst.append(edge[0])
-                n_lst.append(edge[1])
-                t_lst.append('id: '+(edge[0]+'<br>'+'<br>'.join(textwrap.wrap(G.nodes[edge[0]]['n_id'], width = 50))))
-                t_lst.append('id: '+(edge[1]+'<br>'+'<br>'.join(textwrap.wrap(G.nodes[edge[1]]['n_id'], width = 50))))
-            b_trace = go.Scatter(x         = Xb,
-                                 y         = Yb,
-                                 mode      = 'lines',
-                                 line      = dict(color = 'rgba(255, 0, 0, 1)', width = 1, dash = 'solid'),
-                                 hoverinfo = 'none',
-                                 name      = ''
-                                 )
-            data.append(b_trace)
-            m_trace = go.Scatter(x         = Xm,
-                                 y         = Ym,
-                                 opacity   = 1,
-                                 mode      = 'markers+text',
-                                 marker    = dict(symbol = 'circle-dot', size = 50, color = 'blue', line = dict(color = 'rgb(50, 50, 50)', width = 0.15)),
-                                 text      = n_lst,
-                                 hoverinfo = 'text',
-                                 hovertext = t_lst,
-                                 name      = ''
-                                 )
-            data.append(m_trace)
-        if (len(forward) > 0):
-            e_lst = []
-            Xb    = []
-            Yb    = []
-            Xm    = []
-            Ym    = []
-            n_lst = []
-            t_lst = []
-            for item in forward:
-                item = str(item)
-                for edge in edge_list:
-                    a, b = edge
-                    if (item == b):
-                        e_lst.append(edge)
-                        forward.append(a)
-            for edge in e_lst:
-                Xb.append(dict_y[G.nodes[edge[0]]['year']]) 
-                Xb.append(dict_y[G.nodes[edge[1]]['year']])
-                Xb.append(None)
-                Yb.append(G.nodes[edge[0]]['flag'])
-                Yb.append(G.nodes[edge[1]]['flag'])
-                Yb.append(None)
-                Xm.append(dict_y[G.nodes[edge[0]]['year']])
-                Ym.append(G.nodes[edge[0]]['flag'])
-                Xm.append(dict_y[G.nodes[edge[1]]['year']])
-                Ym.append(G.nodes[edge[1]]['flag'])
-                n_lst.append(edge[0])
-                n_lst.append(edge[1])
-                t_lst.append('id: '+(edge[0]+'<br>'+'<br>'.join(textwrap.wrap(G.nodes[edge[0]]['n_id'], width = 50))))
-                t_lst.append('id: '+(edge[1]+'<br>'+'<br>'.join(textwrap.wrap(G.nodes[edge[1]]['n_id'], width = 50))))
-            c_trace = go.Scatter(x         = Xb,
-                                 y         = Yb,
-                                 mode      = 'lines',
-                                 line      = dict(color = 'rgba(255, 0, 0, 1)', width = 1, dash = 'solid'),
-                                 hoverinfo = 'none',
-                                 name      = ''
-                                 )
-            data.append(c_trace)
-            p_trace = go.Scatter(x         = Xm,
-                                 y         = Ym,
-                                 opacity   = 1,
-                                 mode      = 'markers+text',
-                                 marker    = dict(symbol = 'circle-dot', size = 50, color = 'blue', line = dict(color = 'rgb(50, 50, 50)', width = 0.15)),
-                                 text      = n_lst,
-                                 hoverinfo = 'text',
-                                 hovertext = t_lst,
-                                 name      = ''
-                                 )
-            data.append(p_trace)
-        fig = go.Figure(data = data, layout = layout)
-        fig.update_layout(yaxis = dict(scaleanchor = 'x', scaleratio = 0.5), plot_bgcolor = 'rgb(255, 255, 255)',  hoverlabel = dict(font_size = 12))
-        fig.update_traces(textfont_size = 10, textfont_color = 'yellow') 
+                for i in range(0, len(chain)-1):
+                    src_str, tgt_str = str(chain[i]), str(chain[i+1])
+                    if (src_str in article_dict and tgt_str in article_dict):
+                        x1 = article_dict[src_str]['x_pos']
+                        y1 = article_dict[src_str]['y_pos']
+                        x2 = article_dict[tgt_str]['x_pos']
+                        y2 = article_dict[tgt_str]['y_pos']
+                        Xa_chain.extend([x1, x2, None])
+                        Ya_chain.extend([y1, y2, None])
+                for (src, tgt) in citations:
+                    src_str, tgt_str = str(src), str(tgt)
+                    if (src_str in article_dict and tgt_str in article_dict):
+                        x1 = article_dict[src_str]['x_pos']
+                        y1 = article_dict[src_str]['y_pos']
+                        x2 = article_dict[tgt_str]['x_pos']
+                        y2 = article_dict[tgt_str]['y_pos']
+                        if (src_str not in chain):
+                            Xa_other.extend([x1, x2, None])
+                            Ya_other.extend([y1, y2, None])
+
+            edge_trace_other = go.Scatter(
+                                            x         = Xa_other,
+                                            y         = Ya_other,
+                                            mode      = 'lines',
+                                            line      = dict(color = 'rgba(0, 0, 0, 0.15)', width = 0.5, dash = 'dot'),
+                                            hoverinfo = 'none',
+                                            name      = ''
+                                        )
+            edge_trace_chain = go.Scatter(
+                                            x         = Xa_chain,
+                                            y         = Ya_chain,
+                                            mode      = 'lines',
+                                            line      = dict(color = 'black', width = 1, dash = 'solid'),
+                                            hoverinfo = 'none',
+                                            name      = ''
+                                        )
+            node_trace       = go.Scatter(
+                                            x         = articles['x_pos'],
+                                            y         = articles['y_pos'],
+                                            mode      = mode,
+                                            marker    = dict(symbol = 'circle-dot', size = node_size, color = node_colors, line = dict(color = 'rgb(50, 50, 50)', width = 0.15)),
+                                            text      = articles['id'] if node_labels else None,
+                                            hoverinfo = 'text',
+                                            hovertext = hover_texts,
+                                            name      = ''
+                                        )
+            data = [edge_trace_other, edge_trace_chain, node_trace]
+        else:
+            node_colors = []
+            for i, row in articles.iterrows():
+                art_id_str = str(row['id'])
+                if (art_id_str in n_m):
+                    if (min_links > 0):
+                        node_colors.append('rgb(50, 50, 50)')
+                    else:
+                        node_colors.append('blue')
+                else:
+                    node_colors.append('blue')
+            Xa_chain, Ya_chain = [], []
+            node_trace = go.Scatter(
+                                    x         = articles['x_pos'],
+                                    y         = articles['y_pos'],
+                                    mode      = mode,
+                                    marker    = dict(symbol = 'circle-dot', size = node_size, color = node_colors, line = dict(color = 'rgb(50, 50, 50)', width = 0.15)),
+                                    text      = articles['id'] if node_labels else None,
+                                    hoverinfo = 'text',
+                                    hovertext = hover_texts,
+                                    name      = ''
+                                )
+            data = [edge_trace, node_trace]
+        layout = go.Layout( showlegend = False, hovermode = 'closest', margin = dict(b = 10, l = 5, r = 5, t = 10))
+        fig    = go.Figure(data = data, layout = layout)
+        fig.update_layout(
+                            plot_bgcolor = 'rgb(255, 255, 255)',
+                            hoverlabel   = dict(font_size = 12),
+                            xaxis        = dict(showgrid = False, zeroline = False, showticklabels = True, title = 'Years', tickangle = 90, type = 'category', categoryorder = 'array', categoryarray = years),
+                            yaxis        = dict(showgrid = False, zeroline = False, showticklabels = False, title = '')
+                        )
+        fig.update_traces(textfont_size = 10, textfont_color = 'yellow')
         fig.show()
-        return
+        self.ask_gpt_hist                        = pd.DataFrame(citations, columns = ['Paper ID', 'Reference ID'])
+        self.ask_gpt_hist['Paper ID']            = self.ask_gpt_hist['Paper ID'].astype(str)
+        self.ask_gpt_hist                        = self.ask_gpt_hist.merge(articles[['id', 'year']], left_on = 'Paper ID', right_on = 'id', how = 'left')
+        self.ask_gpt_hist.rename(columns = {'year': 'Paper_Year'}, inplace = True)
+        self.ask_gpt_hist.drop('id', axis = 1, inplace = True)
+        self.ask_gpt_hist['Reference ID']        = self.ask_gpt_hist['Reference ID'].astype(str)
+        self.ask_gpt_hist                        = self.ask_gpt_hist.merge(articles[['id', 'year']], left_on = 'Reference ID', right_on = 'id', how = 'left')
+        self.ask_gpt_hist.rename(columns = {'year': 'Reference_Year'}, inplace = True)
+        self.ask_gpt_hist                        = self.ask_gpt_hist[self.ask_gpt_hist['Reference_Year'] <= self.ask_gpt_hist['Paper_Year']]
+        condition                                = (self.ask_gpt_hist['Reference_Year'] == self.ask_gpt_hist['Paper_Year'])
+        indexes_to_drop                          = []
+        for idx, row in self.ask_gpt_hist.loc[condition].iterrows():
+            paper_id = int(row['Paper ID'])
+            ref_id   = str(row['Reference ID'])
+            if (ref_id not in matrix.columns):
+                indexes_to_drop.append(idx)
+            else:
+                if (matrix.loc[paper_id, ref_id] == 0):
+                    indexes_to_drop.append(idx)
+        self.ask_gpt_hist.drop(index = indexes_to_drop, inplace = True)
+        self.ask_gpt_hist['Paper ID (Year)']     = self.ask_gpt_hist.apply(lambda row: f"{row['Paper ID']} ({row['Paper_Year']})", axis = 1)
+        self.ask_gpt_hist['Reference ID (Year)'] = self.ask_gpt_hist.apply(lambda row: f"{row['Reference ID']} ({row['Reference_Year']})", axis = 1)
+        citations                                = [(int(r), int(c)) for (r, c) in zip(self.ask_gpt_hist['Paper ID'], self.ask_gpt_hist['Reference ID'])]
+        self.ask_gpt_hist                        = self.ask_gpt_hist[['Paper ID (Year)', 'Reference ID (Year)']]
+        return citations
+
+    # Function: Analyze Citations
+    def analyze_hist_citations(self, citations, min_path_size = 2):
+        G                     = nx.DiGraph(citations)
+        most_referenced_paper = max(G.in_degree,  key = lambda x: x[1], default = (None, 0))
+        most_citing_paper     = max(G.out_degree, key = lambda x: x[1], default = (None, 0))
+        recent_to_old_paths   = []
+        sources               = sorted({src for src, tgt in citations}, reverse = True)
+        targets               = sorted({tgt for src, tgt in citations})
+        for source in sources:  
+            for target in targets:
+                if (nx.has_path(G, source, target)):
+                    path = nx.shortest_path(G, source = source, target = target)
+                    if (len(path) >= min_path_size):
+                        recent_to_old_paths.append(path)
+        recent_to_old_paths   = sorted(recent_to_old_paths, key = len, reverse = True)
+        filtered_paths        = []
+        for path in recent_to_old_paths:
+            if not any(set(path).issubset(set(existing_path)) for existing_path in filtered_paths):
+                filtered_paths.append(path)
+        recent_to_old_paths   = filtered_paths
+        print('Most Referenced Paper ID:', most_referenced_paper[0], '-> Cited', most_referenced_paper[1], 'Times')
+        print('Paper ID that Cites the Most:', most_citing_paper[0], '-> Cites', most_citing_paper[1], 'Papers')
+        if (len(recent_to_old_paths ) > 0):
+            print('Paper IDs of Longest Citation Path:', recent_to_old_paths[0])
+        return recent_to_old_paths 
 
 ############################################################################
 
@@ -4746,7 +4816,6 @@ class pbx_probe():
             else:    
                 corpus = ' '.join(corpus)
                 prompt = query + ':\n\n' + f'{i+1}. {corpus}\n'
-            #summary = query_chatgpt(prompt)
             summary = self.query_chatgpt(prompt, model, max_tokens, n, temperature, flag, api_key)
         else:
             summary = 'No abstracts were found in the selected set of documents'
