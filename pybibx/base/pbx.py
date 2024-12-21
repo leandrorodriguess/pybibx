@@ -3131,7 +3131,16 @@ class pbx_probe():
         keys_2                   = self.data['doi'].str.lower().tolist()
         keys                     = np.where(sources.isin(['scopus', 'pubmed']), keys_1, np.where(sources == 'wos', keys_2, None))
         corpus                   = ' '.join(ref.lower() for ref in self.u_ref)
-        matched_indices          = [i for i, key in enumerate(keys) if key and re.search(key, corpus)]
+        #matched_indices          = [i for i, key in enumerate(keys) if key and re.search(key, corpus)]
+        matched_indices = []
+        for i, key in enumerate(keys):
+            if (key and key.strip()):
+                try:
+                    compiled_regex = re.compile(key)
+                    if (re.search(compiled_regex, corpus)):
+                        matched_indices.append(i)
+                except:
+                    pass
         insd_r                   = []
         insd_t                   = []
         u_ref_lower              = [ref.lower() for ref in self.u_ref]
