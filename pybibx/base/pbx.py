@@ -1147,7 +1147,8 @@ class pbx_probe():
                 f_list = [item for item in f_list_]
                 for i in range(0, len(f_list)):
                     if (len(f_list[i]) > 0):
-                        if (f_list[i][4] == '-'):
+                        if len(f_list[i]) > 4 and f_list[i][4] == '-':
+                        #if (f_list[i][4] == '-'):
                             f_list[i] = f_list[i][:4] + '=' + f_list[i][5:]
                         if (f_list[i][:3] == 'LID'):
                             f_list[i] = f_list[i].replace(' [doi]', '')
